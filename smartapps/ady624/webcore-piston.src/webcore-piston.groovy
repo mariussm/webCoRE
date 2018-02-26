@@ -3319,6 +3319,129 @@ private long vcmd_httpRequest(rtData, device, params) {
 	return 0
 }
 
+private long vcmd_httpRequestExtended(rtData, device, params) {
+	def uri = params[0].replace(" ", "%20")
+	def method = params[1]
+    def contentType = params[2]
+    String body = params[3]
+	if (!uri) return false
+	def protocol = "https"
+    def userPart = ""
+	def uriParts = uri.split("://").toList()
+	if (uriParts.size() > 2) {
+		warn "Invalid URI for web request: $uri", rtData
+		return false
+	}
+	if (uriParts.size() == 2) {
+		//remove the httpX:// from the uri
+		protocol = uriParts[0].toLowerCase()
+		uri = uriParts[1]
+	}
+    //support for user:pass@IP
+    if (uri.contains('@')) {
+    	def uriSubParts = uri.split('@').toList()
+    	userPart = uriSubParts[0] + '@'
+    	uri = uriSubParts[1]
+    }
+	def internal = uri.startsWith("10.") || uri.startsWith("192.168.")
+	if ((!internal) && uri.startsWith("172.")) {
+		//check for the 172.16.x.x/12 class
+		def b = uri.substring(4,6)
+		if (b.isInteger()) {
+			b = b.toInteger()
+			internal = (b >= 16) && (b <= 31)
+		}
+	}
+    
+	if (internal) {
+		try {
+			if (rtData.logging > 2) debug "Sending internal web request to: $userPart$uri", rtData
+            def ip = ((uri.indexOf("/") > 0) ? uri.substring(0, uri.indexOf("/")) : uri)
+            if (!ip.contains(':')) ip += ':80'
+            Map requestParams = [
+				method: method,
+				path: (uri.indexOf("/") > 0) ? uri.substring(uri.indexOf("/")) : "",
+				headers: [
+					HOST: userPart + ip,
+				], // Missing additional headers
+				query: method == "GET" ? data : null, //thank you @destructure00
+				body: method != "GET" ? data : null //thank you @destructure00
+			]
+			sendHubCommand(new physicalgraph.device.HubAction(requestParams, null, [callback: localHttpRequestHandler]))
+            return 20000
+		} catch (all) {
+			error "Error executing internal web request: ", rtData, null, all
+		}
+	} else {
+		try {
+			if (rtData.logging > 2) debug "Sending external web request to: $uri", rtData
+			def requestParams = [
+				uri:  "${protocol}://${userPart}${uri}",
+				query: method == "GET" ? data : null,
+                //headers: (auth ? [Authorization: auth] : [:]),
+				requestContentType: (method != "GET") ? contentType : "application/x-www-form-urlencoded",
+				body: method != "GET" ? data : null
+			]
+			def func = ""
+			switch(method) {
+				case "GET":
+					func = "httpGet"
+					break
+				case "POST":
+					func = "httpPost"
+					break
+                case "PATCH":
+					func = "httpPatch"
+					break
+				case "PUT":
+					func = "httpPut"
+					break
+				case "DELETE":
+					func = "httpDelete"
+					break
+				case "HEAD":
+					func = "httpHead"
+					break
+			}
+			if (func) {
+				"$func"(requestParams) { response ->
+					setSystemVariableValue(rtData, "\$httpContentType", response.contentType)
+					setSystemVariableValue(rtData, "\$httpStatusCode", response.status)
+					setSystemVariableValue(rtData, "\$httpStatusOk", (response.status >= 200) && (response.status <= 299))
+                    def binary = false
+                    def mediaType = response.contentType.toLowerCase()
+                    switch (mediaType) {
+                    	case 'image/jpeg':
+                    	case 'image/png':
+                    	case 'image/gif':
+                        	binary = true
+                    }
+					if ((response.status == 200) && response.data && !binary) {
+						try {
+							rtData.response = response.data instanceof Map ? response.data : (LinkedHashMap) new groovy.json.JsonSlurper().parseText(response.data)
+						} catch (all) {
+                        	rtData.response = response.data
+						}
+					} else {
+                    	rtData.response = null
+                        if (response.data && (response.data instanceof java.io.ByteArrayInputStream)) {
+	                        rtData.mediaType = mediaType
+    	                    rtData.mediaData = response.data.getBytes()
+                        } else {
+	                        rtData.mediaType = null
+    	                    rtData.mediaData = null
+                        }
+                        rtData.mediaUrl = null;
+                    }
+				}
+			}
+		} catch (all) {
+			error "Error executing external web request: ", rtData, null, all
+		}
+	}
+	return 0
+}
+
 
 private long vcmd_writeToFuelStream(rtData, device, params) {
 	def canister = params[0]
